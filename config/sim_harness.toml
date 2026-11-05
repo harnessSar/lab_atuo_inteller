@@ -1,0 +1,46 @@
+# sim_harness 配置（禁硬编码绝对路径；相对路径相对仓库根 D:\project）
+# 单位：长度 mm（算法/TOML/Lua），UE 工站/机位 cm（仅 ParseMatrixLocal 换一次）
+
+[paths]
+# kin_pad 根（含 pyproject.toml）
+kin_pad_root = "kin_pad"
+# 新机型原型目录（三端 diff 的 save/{model}.py 与插件所在）
+save_dir = "kin_pad/save"
+# UE 演示 Actor 源（三端 diff 第三端）
+lambda_spool_cpp = "PID/Plugins/XtalScene/Source/XtalScene/Private/kin/LambdaSpool.cpp"
+# HTE 设备档案 JSON
+hte_json = "PID/HTE设备介绍.json"
+# 编排证据/草稿工作区（非业务目录，落盘业务产物需人审）
+work_dir = "sim_harness/_work"
+
+[unreal]
+# EngineWire 原生 MCP（PID 编辑器内插件，单 unreal 网关工具；官方插件/lab_simmer 旧路已弃）
+endpoint = "http://127.0.0.1:3000/mcp"
+# capability token 文件（EngineWire 首启自动生成 64 hex；按本机 PID 工程位置改，per-machine 配置）
+token_file = "D:/project/PID/Saved/MCP/capability-token"
+# UE 步骤（刷槽位/装载）默认关；验证时显式开
+run_ue_steps = false
+
+[golden]
+run_golden = true
+
+# ---------------------------------------------------------------------------
+# 模型：开发期 5060 Ollama（Windows 原生）；联调/生产切 5090 vLLM（Linux 原生）
+# 本地推理零许可费；仅云端 API 按 token 计费。
+# 切换只改 base_url/model，图与工具不变。
+# ---------------------------------------------------------------------------
+[llm]
+# 联调/生产（5090 vLLM，跨机 HTTP）——当前生效（2026-11-03 切）
+base_url = "http://10.249.21.47:8000/v1"
+#model = "Qwen/Qwen2.5-32B-Instruct-AWQ"
+model = "tclf90/Qwen3-VL-30B-A3B-Instruct-AWQ"
+api_key = "EMPTY"
+# VL 总闸：多模态模型 = true（nl_graph 截图带图回喂，模型真"看到"视口）；
+# 纯文本模型必须 false（图只落盘不进消息，防 serving 400）
+vision = true
+
+# 开发（5060 Ollama；取消注释并注释上面三行；qwen2.5 纯文本，vision 须改 false）
+# base_url = "http://localhost:11434/v1"
+# model = "qwen2.5:7b"
+# api_key = "ollama"
+# vision = false

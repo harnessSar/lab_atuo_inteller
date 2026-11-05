@@ -1,0 +1,19 @@
+{
+  "name": "sim_harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "资产编排 Agent Harness（dsh + LangGraph）；Phase 1 机器闸在 kin_pad/src/kin_pad/mcp/asset",
+  "scripts": {
+    "orchestrate": "python -m orchestrator.run_device",
+    "test:asset": "cd ../kin_pad && uv run --extra mcp pytest tests/test_asset_mcp.py"
+  },
+  "dependencies": {
+    "@langchain/langgraph": "^0.2.0",
+    "openai": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
