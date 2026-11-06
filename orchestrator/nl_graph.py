@@ -1,19 +1,10 @@
-"""自然语言 → UE 场景落地（LangGraph 版图，Phase NL-1；2026-11-04 起 EngineWire 网关模式）。
+"""自然语言 → UE 场景落地，采用网关模式）。
 
 链路（ReAct环）：用户自然语言 → [plan] LLM 原生 tool calling 出**一步**
       → [execute] 唯一 @tool `unreal` 透传 EngineWire 网关（search/describe/execute）
       → Observation 回喂消息历史 → 回 [plan]，max_steps 兜底防死循环。
 
-工具面（通用架构，无特权高频层）：模型可见 = **单个 `unreal` 网关工具**，对端即
-EngineWire 0.6.0 的原生 `unreal` 工具（58 domains 数百能力，四 operation）。
-本层是**薄层零映射纯横切**：token/会话（ue_mcp_client）、失败二分、Observation
-消毒（base64 截图落盘不进历史）、上下文压缩（search/describe 回执裁切）、
-steps 口径（仅 operation=execute 计步；search/describe 只读不计）。
-configure operation 不开放给模型（治理操作，W4 consent/HITL 另议）。
-
-能力发现与契约全在服务端（search 命中 action names/topics/family/domain/summary；
-describe 回 inputSchema+examples），本层**不维护任何能力清单**——EngineWire 升级
-能力随通随到。
+# steps统计:仅execute 计步,search/describe不计步
 """
 
 from __future__ import annotations
@@ -39,10 +30,10 @@ from pydantic import BaseModel, Field  # noqa: E402
 from llm.provider import ChatMessage, LlmConfig, LlmProvider  # noqa: E402
 from orchestrator.ue_mcp_client import UeMcpClient  # noqa: E402
 
-logger = logging.getLogger("sim_harness.nl_graph")
+logger = logging.getLogger("lab_atuo_inteller.orchestrator.nl_graph")
 
 # ---------------------------------------------------------------------------
-# 工具面：单个 unreal 网关 @tool（函数 = schema = 执行体；薄层纯横切）
+# 工具面：单个 unreal 网关 @tool
 # ---------------------------------------------------------------------------
 
 _FAIL_PREFIX = "执行失败："  # Observation 失败前缀（report 据此判定本步未真执行）
@@ -287,16 +278,41 @@ _VISION_SUFFIX = """
 """
 
 
-def _load_skills(skills_dir: Path | None) -> str:
-    """扫描 ``skills_dir/*/SKILL.md`` 拼 prompt 段（最小实现：全量注入 system prompt）。
+# 资产编排追加段（enable_asset_tools=True 时拼进 system prompt）
+_ASSET_SUFFIX = """
+运动学资产编排工具（纯本地、无 UE；产物是 TOML/Lua 草稿，不落业务盘，人审后才合入）：
+- asset_catalog：读 Blender 场景导出 JSON → 物体清单（name/parent 装配父子）。编排必先调它。
+- asset_land：把全部语义结论**一次性**提交落地（自动轴判定 + 主从镜像分组；每件只提交一次）。
+  逐件判断运动：宁多勿漏、子级件也列、纯框架/瓶/工装等静止件不列；
+  motion 指**该件自身**的自由度——丝杠/手指座/底座滑轨沿轴滑动永远是"平移"，
+  拧盖夹爪本体绕轴转才是"旋转"；模组名带"旋转/拧"是模组级功能，≠其零件都旋转。
+  返回的人审提示必须原样报告用户，不得隐瞒。
+- asset_emit：由落地关节生成 TOML/Lua 草稿并跑机器闸；闸失败按问题清单修结论后重新 asset_land。
+- asset_score：草稿对 golden TOML/Lua 评分（进产物/type/axis/passive/lua + 失败明细）。
+编排流程：asset_catalog 看清单 → （有资料图就结合看）逐件判运动 → asset_land →
+asset_emit 看闸 → 有 golden 时 asset_score 评分并报告成绩与多出件。
+"""
 
-    与 ``.cursor/skills`` 同格式同语料（DESIGN：知识一套两端用）；YAML frontmatter 剥掉，
-    只注正文。skill 增多后接 RAG 索引按需加载（H 线），本函数是过渡。
+_SKILL_ORDER = {"workflow": 0, "device": 1, "other": 2}
+
+
+def _load_skills(skills_dir: Path | None) -> str:
+    """扫描 ``skills_dir/**/SKILL.md`` 拼 prompt 段（最小实现：全量注入 system prompt）。
+
+    目录三分：``workflow/`` Blender–KinPad–Unreal，``device/`` 设备类型，``other/`` 其余。
+    格式同 ``.cursor/skills``（YAML frontmatter + 正文）；frontmatter 剥掉，只注正文。
+    标题用相对路径，便于模型按类命中。skill 再涨后改 RAG 按需加载，本函数是过渡。
     """
     if not skills_dir or not skills_dir.is_dir():
         return ""
+
+    def _sort_key(smd: Path) -> tuple[int, str]:
+        rel = smd.parent.relative_to(skills_dir)
+        top = rel.parts[0] if rel.parts else ""
+        return (_SKILL_ORDER.get(top, 9), rel.as_posix().lower())
+
     parts: list[str] = []
-    for smd in sorted(skills_dir.glob("*/SKILL.md")):
+    for smd in sorted(skills_dir.glob("**/SKILL.md"), key=_sort_key):
         try:
             text = smd.read_text(encoding="utf-8")
         except OSError:
@@ -307,10 +323,17 @@ def _load_skills(skills_dir: Path | None) -> str:
             if end != -1:
                 body = text[end + 4:].strip()
         if body:
-            parts.append(f"### 技能：{smd.parent.name}\n{body}")
+            rel = smd.parent.relative_to(skills_dir).as_posix()
+            parts.append(f"### 技能：{rel}\n{body}")
     if not parts:
         return ""
-    return "\n\n## 业务技能（命中即按技能执行，不得自由发挥）\n\n" + "\n\n".join(parts)
+    return (
+        "\n\n## 业务技能（命中即按技能执行，不得自由发挥）\n\n"
+        "分三类：`workflow/` = Blender–KinPad–Unreal 工作流；"
+        "`device/` = 设备类型特点与迭代经验；`other/` = 场景、Zenoh、打包等。\n"
+        "几何常数、脉冲标定、端口以磁盘 TOML 与 `.cursor/rules` 为准，技能卡片里的数字只是提示。\n\n"
+        + "\n\n".join(parts)
+    )
 
 
 class NlState(TypedDict, total=False):
@@ -439,12 +462,14 @@ def _args_hint(tool_obj) -> str:
     return ", ".join(parts)
 
 
-def make_execute_node(gateway_tool, work_dir: Path, sink: dict[str, str] | None = None,
-                      vision: bool = False):
-    """工厂：注入网关 @tool + 证据目录，产出 execute 节点（pydantic 先校验参数）。
+def make_execute_node(tools: dict[str, Any], work_dir: Path,
+                      sink: dict[str, str] | None = None, vision: bool = False):
+    """工厂：注入工具分发表（``{工具名: @tool}``）+ 证据目录，产出 execute 节点。
 
-    steps 口径：仅网关 ``operation=execute`` 计 1——search/describe 是只读检索，
-    不消耗执行预算；本地校验拦截计 fails（连续 3 次中止），任何成功调用清零 fails。
+    分发：``plan["tool"]`` → 分发表查 @tool → invoke（pydantic 先校验参数）。
+    steps 口径：网关工具仅 ``operation=execute`` 计 1（search/describe 只读不计）；
+    资产工具（asset_*）每次真实执行都计 1（本地但耗预算，防环）；
+    本地校验拦截计 fails（连续 3 次中止），任何成功调用清零 fails。
     ``sink``/``vision``：VL 回喂——截图 data URL 经网关 tool 旁路写 sink，本节点
     读入 ``state.vision_image``，由 plan 注入带图消息（vision=False 时丢弃不注入）。
     """
@@ -457,23 +482,26 @@ def make_execute_node(gateway_tool, work_dir: Path, sink: dict[str, str] | None 
         tool 消息回喂（``tool_call_id`` 配对），走环回 plan。
         """
         plan = state["plan"]
+        tool_obj = tools.get(plan["tool"])
+        if tool_obj is None:  # 理论不可达（plan 白名单与分发表同源），防御性短路
+            return {"error": f"execute 分发失败：未知工具 {plan['tool']}"}
         if sink is not None:
             sink.pop("image", None)  # 清旧图：sink 生命周期跨整个 invoke，防上次残留误注
         try:
-            obs = gateway_tool.invoke(plan["arguments"])
+            obs = tool_obj.invoke(plan["arguments"])
         except _UeTransportError as e:
             return {"error": f"UE 连接失败：{e}"}
         except Exception as e:  # noqa: BLE001 - pydantic 本地校验拦截（未碰 UE）：回喂自纠
             obs = (f"{_FAIL_PREFIX}参数校验（请对照参数清单修正后重新调用）：{str(e)[:300]}"
-                   f"；参数清单：{_args_hint(gateway_tool)}")
+                   f"；参数清单：{_args_hint(tool_obj)}")
             hist = state["messages"] + [ChatMessage("tool", obs, tool_call_id=plan["call_id"])]
             # 不计 steps（未真实执行），但计 fails——否则模型反复发同样坏参数会绕过 max_steps 成无限环
             return {"result": {"content_text": obs}, "messages": hist,
                     "fails": state.get("fails", 0) + 1}
         hist = state["messages"] + [ChatMessage("tool", obs, tool_call_id=plan["call_id"])]
         out: NlState = {"result": {"content_text": obs}, "messages": hist, "fails": 0}
-        # steps 只计真实变更（execute）；search/describe 只读不计
-        if (plan["arguments"].get("operation") or "") == "execute":
+        # steps：网关 search/describe 只读不计；资产工具与网关 execute 都计真实执行
+        if plan["tool"] != _GATEWAY_TOOL or (plan["arguments"].get("operation") or "") == "execute":
             out["steps"] = state.get("steps", 0) + 1
         # 消毒落盘的截图标记 → state（report/GUI 展示用）
         m = re.match(r"\[screenshot\] (.+)", obs)
@@ -505,18 +533,22 @@ def report_node(state: NlState) -> NlState:
 # ---------------------------------------------------------------------------
 
 def build_nl_graph(llm: LlmProvider, client: UeMcpClient, work_dir: Path, max_steps: int = 18,
-                   vision: bool = False):
+                   vision: bool = False, extra_tools: list | None = None):
     """@abstract:装配 LangGraph 状态图:plan ⇄ execute 的 ReAct 环（report 终态）。
-    网关模式：单工具（unreal）+ 双节点环；证据截图由 execute 落盘；
+    网关模式：unreal 网关 + 可选 ``extra_tools``（如 asset_* 资产编排工具）共一张
+    按名分发表；证据截图由 execute 落盘；
     ``vision``=True（VL 模型）时截图 data URL 经 sink 旁路 → state → plan 注入带图消息。
     """
     # 制作node：计划、执行、反馈这3个
     sink: dict[str, str] = {}  # 截图 data URL 旁路（gateway tool 写 / execute 读，一次 invoke 一实例）
     gateway = make_gateway_tool(client, work_dir, sink)
-    tool_defs = [convert_to_openai_tool(gateway)]
+    tools: dict[str, Any] = {gateway.name: gateway}  # 按名分发表（plan 白名单与 execute 分发同源）
+    for t in (extra_tools or []):
+        tools[t.name] = t
+    tool_defs = [convert_to_openai_tool(t) for t in tools.values()]
     g = StateGraph(NlState)
     g.add_node("plan", make_plan_node(llm, tool_defs, max_steps, vision))
-    g.add_node("execute", make_execute_node(gateway, work_dir, sink, vision))
+    g.add_node("execute", make_execute_node(tools, work_dir, sink, vision))
     g.add_node("report", report_node)
     g.set_entry_point("plan")
 
@@ -547,16 +579,19 @@ def run_nl_command(
     skills_dir: str | Path | None = None,
     max_steps: int = 18,
     user_images: list[str] | None = None,
+    enable_asset_tools: bool = True,
 ) -> NlState:
     """一次自然语言指令的端到端入口（库形式；chat.py 是 CLI 壳，ui/chat_ui.py 是 GUI 壳）。
 
     ReAct 环：模型经唯一 unreal 网关工具 search → describe → execute 直到收敛
     （不再调工具）或触 ``max_steps`` 上限（仅计 execute）。
-    ``skills_dir``：业务技能目录（默认 sim_harness/skills），命中任务按 SKILL.md 执行。
+    ``skills_dir``：业务技能目录（默认 ``lab_atuo_inteller/skills``，含 workflow/device/other），命中任务按 SKILL.md 执行。
     VL 回喂：``llm_cfg.vision=True``（多模态模型，如 Qwen3-VL）时截图以带图 user
     消息回喂（模型真"看到"视口）；纯文本模型保持 False（图只落盘，防 400）。
     ``user_images``：用户上传图的 data URL 列表（GUI 附件），vision 开启时挂进
     初始 user 消息（首轮即见）；纯文本模型丢弃。
+    ``enable_asset_tools``：装配运动学资产编排工具（asset_catalog/land/emit/score，
+    两步编排链接 ReAct 环；kin_pad 依赖不可用时降级为仅 UE 网关并 warning）。
     返回终态 ``NlState``：成功看 ``report``/``screenshot_path``，失败看 ``error``。
     """
     # 装配模型提供者（None 时走 llm/provider 的环境变量默认）
@@ -565,13 +600,22 @@ def run_nl_command(
     client = UeMcpClient(ue_endpoint, token_file=ue_token_file)
     # 证据目录：默认 sim_harness/_work（非业务目录）
     wd = work_dir or (Path(__file__).resolve().parents[1] / "_work")
-    # 技能目录：默认 sim_harness/skills（与 .cursor/skills 同语料）
+    # 技能目录：默认 lab_atuo_inteller/skills（workflow / device / other）
     sd = Path(skills_dir) if skills_dir else (Path(__file__).resolve().parents[1] / "skills")
     # VL 总闸在模型配置（LlmConfig.vision）：VL 模型拼视觉段 prompt，纯文本模型不带
     vision = llm.cfg.vision
-    sys_prompt = _PLANNER_SYS + (_VISION_SUFFIX if vision else "") + _load_skills(sd)
+    # 资产编排工具（asset_*）：默认装配；kin_pad 依赖缺失时降级仅 UE 网关（不炸图）
+    extra: list = []
+    if enable_asset_tools:
+        try:
+            from orchestrator.asset_tools import make_asset_tools
+            extra = make_asset_tools(wd)
+        except ImportError as exc:
+            logger.warning("资产工具不可用（%s），本轮仅 UE 网关", exc)
+    sys_prompt = (_PLANNER_SYS + (_VISION_SUFFIX if vision else "")
+                  + (_ASSET_SUFFIX if extra else "") + _load_skills(sd))
     # 编译状态图并执行（invoke 同步跑完整图，返回终态）
-    graph = build_nl_graph(llm, client, wd, max_steps, vision)
+    graph = build_nl_graph(llm, client, wd, max_steps, vision, extra_tools=extra)
     # ReAct 初始账本：system 规则 + 用户指令（vision 开启时用户上传图挂进初始消息，首轮即见）
     init_user = ChatMessage("user", user_input,
                             images=(user_images if (vision and user_images) else None))

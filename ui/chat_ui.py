@@ -33,6 +33,9 @@ def _load_cfg() -> dict:
         work = (repo / work).resolve()
     llm_t = cfg.get("llm", {})
     ue_t = cfg.get("unreal", {})
+    # [nl] skills_dir：相对 lab_atuo_inteller/ 的 skill 注入目录（缺省 = skills/ 全量）
+    sd = cfg.get("nl", {}).get("skills_dir")
+    skills_dir = (_SIM_ROOT / sd).resolve() if sd else None
     return {
         "llm_cfg": LlmConfig(
             base_url=llm_t.get("base_url", "http://localhost:11434/v1"),
@@ -43,6 +46,7 @@ def _load_cfg() -> dict:
         "ue_endpoint": ue_t.get("endpoint", "http://127.0.0.1:3000/mcp"),
         "ue_token_file": ue_t.get("token_file"),  # EngineWire capability-token（per-machine）
         "work_dir": work,
+        "skills_dir": skills_dir,
     }
 
 
@@ -50,9 +54,11 @@ def _load_cfg() -> dict:
 async def _start() -> None:
     await cl.Message(
         content=(
-            "**sim_harness** 自然语言 → UE 落地\n"
-            "链路：LangGraph plan → execute → evidence → report\n\n"
-            "示例：`在UE中新增1个立方体网格` / `查一下场景里有哪些Actor` / `把 MCP_Cube_1 移到 z=200`"
+            "**sim_harness** 自然语言 → UE 落地 + 运动学资产编排\n"
+            "链路：LangGraph plan ⇄ execute（ReAct）→ report；"
+            "工具 = unreal 网关 + asset_catalog/land/emit/score\n\n"
+            "UE 示例：`在UE中新增1个立方体网格` / `查一下场景里有哪些Actor`\n"
+            "资产编排示例：上传设备资料图 + `对 _work/cap_scene.json 做运动学资产编排并评分`"
         )
     ).send()
 
@@ -81,6 +87,7 @@ async def _main(message: cl.Message) -> None:
         ue_endpoint=cfg["ue_endpoint"],
         ue_token_file=cfg["ue_token_file"],
         work_dir=cfg["work_dir"],
+        skills_dir=cfg["skills_dir"],
         user_images=user_images,
     )
 

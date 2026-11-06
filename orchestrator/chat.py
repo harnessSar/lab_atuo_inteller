@@ -25,6 +25,8 @@ def main() -> int:
     ap.add_argument("instruction", help="自然语言指令，如：在UE中新增1个立方体网格")
     ap.add_argument("--config", default="config/sim_harness.toml", help="相对 sim_harness/")
     ap.add_argument("--ue-endpoint", default=None, help="覆盖 UE MCP 端点")
+    ap.add_argument("--images", nargs="*", default=None,
+                    help="附图路径（VL 模型首轮即见，如设备资料图）；纯文本模型自动丢弃")
     args = ap.parse_args()
 
     sim_root = Path(__file__).resolve().parents[1]
@@ -47,9 +49,22 @@ def main() -> int:
     endpoint = args.ue_endpoint or ue_t.get("endpoint", "http://127.0.0.1:3000/mcp")
     token_file = ue_t.get("token_file")  # EngineWire capability-token（per-machine，可空=无鉴权）
     work_dir = _rel(cfg_toml.get("paths", {}).get("work_dir", "sim_harness/_work"))
+    # [nl] skills_dir：相对 sim_root 的 skill 注入目录（缺省 = skills/ 全量）
+    sd = cfg_toml.get("nl", {}).get("skills_dir")
+    skills_dir = (sim_root / sd).resolve() if sd else None
+    # --images → data URL（vision 闸在 run_nl_command：纯文本模型丢弃）
+    user_images = None
+    if args.images:
+        import base64
+        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+        user_images = [
+            f"data:{mime.get(Path(p).suffix.lower(), 'image/png')};base64,"
+            + base64.b64encode(Path(p).read_bytes()).decode()
+            for p in args.images]
 
     final = run_nl_command(args.instruction, llm_cfg=llm_cfg, ue_endpoint=endpoint,
-                           ue_token_file=token_file, work_dir=work_dir)
+                           ue_token_file=token_file, work_dir=work_dir,
+                           skills_dir=skills_dir, user_images=user_images)
     print(final.get("report", "(无报告)"))
     return 0 if not final.get("error") else 1
 

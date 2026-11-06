@@ -11,7 +11,14 @@ lambda_spool_cpp = "PID/Plugins/XtalScene/Source/XtalScene/Private/kin/LambdaSpo
 # HTE 设备档案 JSON
 hte_json = "PID/HTE设备介绍.json"
 # 编排证据/草稿工作区（非业务目录，落盘业务产物需人审）
-work_dir = "sim_harness/_work"
+work_dir = "lab_atuo_inteller/_work"
+
+[nl]
+# ReAct 环 skill 注入目录（相对 lab_atuo_inteller/）。全量 17 个 skill ≈7K tok，
+# 16K ctx 的资产编排链放不下（2026-11-06 实测 16481>16384）；先指向 _work/skills_mini
+# （3 个相关 skill ≈1.2K tok）。注释掉本行 = 默认 skills/ 全量（UE 指令适用）；
+# 根治等 H5 RAG 按需加载。
+skills_dir = "_work/skills_mini"
 
 [unreal]
 # EngineWire 原生 MCP（PID 编辑器内插件，单 unreal 网关工具；官方插件/lab_simmer 旧路已弃）
