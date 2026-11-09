@@ -33,7 +33,7 @@ description: >-
 - 被动关节：`is_passive=true` + `passive_expr`——**原生 Lua** 表达式，`J["name"]` 引用他关节位置，可用 `math.*`、`and/or`、比较等完整语法；引用目标必须存在于 joints（linkage 闸）
 - 镜像分组：同 parent + 同名字前缀（去尾部编号）为一组，最小编号主动，其余 1:1 `follow` **同组第 1 个**（不是 parent）——纯机械规则，`auto_passives` 自动判定，不需要模型
 - 产物契约：`M.resolve_passives(J) -> { positions = { name = value, ... } }`；`M.init(params)` 为可选空实现钩子；文件头有自动生成注释，线性从动勿手改
-- 一份 Lua 两端加载：kin_pad（lupa）与 UE（UnLua `FXtalKinLuaHost`）读**同一个** `{stem}_passives.lua`（stem 默认取设备 name 小写，可显式指定），UTF-8 **BOM**
+- 一份 Lua 两端加载：kin_pad 与 UE 运行时读**同一个** `{stem}_passives.lua`（stem 默认取设备 name 小写，可显式指定），UTF-8 **BOM**——所以表达式必须是宿主无关的原生 Lua，不许带 Python 味
 - 生成即闸：lupa 编译校验，语法错抛 `PassiveLuaGenError`（带关节名）阻止落盘；复杂从动（耦合、`matrices` 输出）在生成物上手工扩写，重存时若会话内无表达式则不覆盖已有脚本
 
 ## 生成与落地分离

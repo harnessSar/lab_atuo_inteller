@@ -138,10 +138,12 @@ type DeviceState = {
 | `diff_three_end_constants(model, save_dir, cpp)` | 三端几何常数**只读** diff（证据交人审） |
 | `run_golden_tests(kin_pad_root, pytest_args?)` | 子进程 `uv run pytest` → 结构化 pass/fail |
 
-模块：`spec.py`（pydantic 红线机器强制）/ `parsing.py` / `emit.py` / `validate.py` / `diffcheck.py` / `golden.py` / `server.py`。
+模块：`spec.py`（pydantic 红线机器强制）/ `parsing.py` / `emit.py` / `validate.py` / `diffcheck.py` / `golden.py` / `server.py` / `semantic_land.py`（两步链第二步，见下）。
 测试：`kin_pad/tests/test_asset_mcp.py`（13 项离线，全绿）。**注意：需** `uv run --extra mcp pytest`（pydantic 在 mcp extra）。
 
 **红线（**`spec.py` **机器强制）**：单位 mm/rad；TOML 数字 ASCII `-`；`pulses_per_unit≠0`；生产关节禁 `*-demo`；被动关节必须有 `passive_expr` 且 `J["x"]` 引用存在；电机↔关节一致。
+
+**两步编排链（CAP8A POC 定形，2026-11-06）**：第一步 = 模型**单发**看资料图+场景清单产出语义结论 `{part, motion, direction}`（专注单发，不进自由环）；第二步 = `semantic_land` 纯工具把结论落地成 JointSpec → `generate_assets` → `validate_assets` → golden 评分。**生成与落地分离**：模型只出语义，几何/命名/红线全机器强制。POC5b 基线（进产物 45/46、type 45/46、passive 45/46、lua 30/30）与失败根因 → `rag/corpus/kinematics/cap8a-two-step-poc.md`、`cap8a-pitfalls.md`；同 mesh 重复件去重已内建。
 
 **UE 侧（Phase 2，新路）**：编辑器原语**官方工具集已全覆盖**（2026-10-30 实测 ~50 个 Toolset 注册，§11 F4），自定义 `XtalSceneToolset` **收缩为仅业务逻辑**。
 
@@ -190,11 +192,12 @@ sim_harness/
 ├─ DESIGN.md                  # 本文档
 ├─ orchestrator/              # 编排层（LangGraph，Python）
 │  ├─ chat.py                 # 自然语言CLI 入口
-│  ├─ nl_graph.py             # graph入口，采用ReAct模式（plan→execute→evidence→report）
+│  ├─ nl_graph.py             # graph入口，采用ReAct模式（plan→execute→evidence→report）；build_nl_graph(extra_tools=) 可挂扩展工具
+│  ├─ asset_tools.py          # 资产编排 4 @tool：asset_catalog/asset_land/asset_emit/asset_score（跨工具状态走 work_dir/asset_run/ 磁盘句柄）
 │  ├─ pipeline.py             # kin_pad编排资产管线（计划采用固定流程）
 │  └─ ue_mcp_client.py        # UE 官方 MCP 插件，支持自定义能力拓展
-├─ skills/                    # Agent 技能包（规划；SKILL.md + frontmatter，同 .cursor/skills 格式）
-├─ rag/                       # 语料与向量索引（规划；corpus chunk + 本地 embedding）
+├─ skills/                    # Agent 技能包（14 张 SKILL.md，边界见 §11 H2；[nl] skills_dir 可指小样集）
+├─ （rag/ 在工作区根，非本目录）  # 语料首批 4 卡 + kg_edges.yaml 已建于 <workspace>/rag/corpus（规则 120 合同位置，Cursor/Agent 共用一份）；embedding/向量库待 H5
 ├─ ui/                        # 薄 GUI 面板（规划；Chainlit；开发期先用 langgraph dev/Studio）
 ├─ llm/
 │  └─ provider.py             # OpenAI-compat 适配（Ollama/vLLM/云端只改配置）
@@ -231,6 +234,7 @@ lab_simmer/                       # UE 5.8 工程（UE 落地端，新路）
 | ⑤ UE 通道迁移（**新路 lab_simmer**） | `ue_mcp_client.py`（标准 MCP client）替换 `unreal_bridge.py` ✅；lab_simmer 自建 `XtalSceneToolset` ⬜（**F5 延后**，优先 NL 链路） | 🔵 进行中（客户端已通真机 §11 F6） |
 | ⑥ NL 全链路 | 自然语言 → LangGraph(plan→execute→evidence→report) → 官方 toolset → UE 落地；`orchestrator/nl_graph.py` + `chat.py` | 🔵 进行中（Stub-LLM 全链路已通 §11 G；**只欠真模型**——Ollama 下载中） |
 | ⑦ 自有 Agent（**新主线**，2026-10-30 晚拍板） | 四能力：SKILL / RAG / 流程执行 / HITL；双模运行时 + 薄 GUI 主入口；dsh 降级参考对照 | ⬜ 待做（设计已定，验收见 §11 H） |
+| ⑧ 资产两步链 POC（CAP8A） | 语义单发 + `semantic_land` 落地 → 机器闸 → golden 评分；`asset_tools.py` 4 @tool 已可挂 nl_graph 自由环 | 🔵 进行中（POC5b 基线 45/46、lua 30/30；自由环链路 4 步全通。待办：`step1_semantics` 单发工具化 → H4、对称完整性闸、18 多出件专家确认） |
 
 **③ 说明**：orchestrator 当前为**顺序管线**（`pipeline.py` 每个节点对应 LangGraph 一个节点，边逻辑一致），LangGraph 引入后可平铺替换；LLM 节点（`gen_toml_lua`/`gen_bp_spec`/`llm_fix`）以 `# LLM-HOOK` 标注为确定性占位，④ 接模型后替换为 `llm/provider` 调用。已用 HTE 设备 `5031` + demo 电机表端到端跑通（无 UE/无 golden）：parse→gen→gate→three_end_diff→brush_slots(skipped)→human_gate，证据包 `sim_harness/_work/5031_evidence.json`。
 
@@ -305,10 +309,10 @@ lab_simmer/                       # UE 5.8 工程（UE 落地端，新路）
 > 目标：SKILL / RAG / 流程化任务执行 / 人机交互四能力全自有。主入口 = 薄 GUI 直连（HTTP+SSE），MCP 封装仅跨宿主任务级委托。迭代批次即验收顺序：
 
 - [ ] **H1 MLP 自由 loop**：`agent/` 自由 loop 图（LangGraph）+ 工具装配（ue / kinpad_asset 经 MCP）+ CLI 对话框跑通——证明"模型能自主用我们的工具链干活"
-- [ ] **H2 skill loader**：`skills/` 目录 + frontmatter 解析 + `use_skill` 工具 + 系统提示词清单注入；格式同 `.cursor/skills`，语料一套两端共用
+- [ ] **H2 skill loader**：`skills/` 目录 + frontmatter 解析 + `use_skill` 工具 + 系统提示词清单注入；格式同 `.cursor/skills`，语料一套两端共用。**边界（2026-11-07 定）**：Agent 库只收**使用工程工具的经验**（产物契约/工具用法/标定经验），工程实现（C++/proto/路由内部）留 `.cursor/skills` 开发侧——纯实现 3 张已撤出（`_work/skills_archive/`），混合型已抽实现段。**ctx 实测（2026-11-07）**：17 张全量注入 = 16481 tok 爆 Qwen3-VL 16K 上限 → 过渡方案 `[nl] skills_dir` 指 `_work/skills_mini`（3 张相关卡）；根治靠 H5 按需加载
 - [ ] **H3 interrupt 审批**：CLI 落地 interrupt（危险操作 / 闸失败挂起 → 人输入 → 续跑）
-- [ ] **H4 流水线意图识别**：自由 loop 挂流水线触发器（"接入新设备 5031" → §4 流水线图，闸结果逐站汇报）
-- [ ] **H5 RAG**：corpus 建设（Docs / 规则 / TOML / 代码 chunk）+ 本地 embedding（Ollama/vLLM 均可）+ 向量库 + `search_knowledge` 工具
+- [ ] **H4 流水线意图识别**：自由 loop 挂流水线触发器（"接入新设备 5031" → §4 流水线图，闸结果逐站汇报）。**资产链预演（2026-11-07）**：4 资产 @tool 挂自由环链路全通（catalog→land→emit→score 4 步，`_work/test_nl_asset_live.py`；幻觉件名→人审、重复件→去重等安全网全生效），但**环内语义步质量确定性不足**（按件名"旋转"字眼整批误判 motion，type 2/46；temp=0 复跑逐字节相同——非采样噪声而是形态问题）→ 确认第一步语义须**单发专注**（POC5 形态），做成 `step1_semantics` 工具是正路，自由环只调度不做语义
+- [ ] **H5 RAG**（**优先级上调**：H2 实测全量注入爆 16K ctx）：corpus 首批 4 卡 + `kg_edges.yaml` 已建于 `<workspace>/rag/corpus/`（规则 120 合同位置，Cursor/Agent 共用）；待做 = 本地 embedding（Ollama/vLLM 均可）+ 向量库 + `search_knowledge` 工具 + skill 按需加载
 - [x] **H6a GUI 最小版**（2026-11-02 提前落地）：`ui/chat_ui.py`（Chainlit 2.12，端口 **8501**——8000 被 UE MCP 占）单命令面板：消息 → `run_nl_command` → 报告 + 证据截图内联；启动器 `ui/启动GUI.cmd`（双击）或 `python -m chainlit run ui/chat_ui.py --port 8501`
 - [ ] **H6b GUI 完整版**：流式输出 + interrupt 审批 UI + 多轮会话记忆（等 H1 自由 loop 接入后做）
 - [ ] **H7 MCP 封装（远期）**：Agent 整体包 MCP server 对外任务级委托（`run_device_onboarding` 等粗粒度工具）；dsh / Cursor 可作宿主
@@ -336,3 +340,6 @@ lab_simmer/                       # UE 5.8 工程（UE 落地端，新路）
 - **function calling 用原生 tool 模式（2026-11-03）**：废弃「prompt 塞手写 schema + 文本 JSON 手抠 + pydantic 校验」变体。`TOOL_DEFS`（OpenAI function tools 声明）+ `_TOOL_ROUTE`（函数名→toolset 全名/UE 工具名映射，撞名再加 `scene__` 前缀 alias）；空 `tool_calls` = 越界显式出口；幻觉名/坏 arguments JSON 回喂重试一次。vLLM/Ollama 均实测支持；guided JSON（D3）转给 D4 结构化起草用。
 - **ReAct 环三要素（2026-11-03，G9）**：① 回边 evidence→plan；② Observation 以 `role="tool"` 消息回喂（`tool_call_id` 与 assistant 的 `tool_calls` 配对——缺一 vLLM/Ollama 直接 400；截图 base64 消毒成文字，否则爆上下文）；③ 终止 = 模型不再调工具（完成/直接答/越界三合一，结论即 report）+ max_steps 兜底。**执行失败二分**：`resp.raw` 空 = 传输层失败（UE 未开）短路 report；`raw` 非空 = 工具拒绝（校验错误含 schema 文本）回喂走环——失败也是 Observation，7B 实测能自纠。校验失败重试留在 plan 内部（2 次），不占用环边、无自环。
 - **@tool 模式约定（2026-11-03，G10）**：① langchain_core 1.7 **不解析 docstring Args 段**（整段塞工具 description），参数说明必须写 `Field(description=...)`、工具显式 `args_schema=`；② invoke 后嵌套参数以**模型实例**传入（`x.model_dump()` 还原 dict 喂 UE）；③ 本地 pydantic 校验失败**不计 steps**（未碰 UE，steps 只计真实执行），max_steps 默认 8；④ 无默认值字段 = 必传，镜像 UE 校验器怪癖；⑤ UE 工具真实 schema 以 `describe_toolset` 实测为准（`set_actor_transform` 是 `(actor, xform)` 嵌套，勿凭直觉平铺）；⑥ `get_actor_transform` 供模型动作后自查，配合防跳步 prompt（没调工具的动作不得声称完成、不输出"我将再次尝试"式中间意图）。
+- **两步链：生成与落地分离（2026-11-06 定形）**：模型只做单发语义判断（`{part, motion, direction}`），JointSpec/TOML/Lua 落地全机器（`semantic_land` → `emit` → `validate`）；语义质量不收口于 prompt 工程，而收口于"单发专注 + 机器闸 + golden 评分"。
+- **自由环不做语义步（2026-11-07 实测）**：资产 4 工具挂 ReAct 环链路全通，但模型在环内按件名字眼整批误判 motion（type 2/46），temp=0 复跑逐字节相同——非采样噪声而是形态问题；第一步单发（POC5）做成 `step1_semantics` 工具、由流水线编排是正路（H4 模式）。
+- **skill 全量注入有 ctx 上限（2026-11-07）**：17 张 SKILL.md ≈ 16.5K tok > Qwen3-VL 16K ctx；过渡用 `[nl] skills_dir` 小样集，根治 = H5 RAG 按需加载（优先级因此上调）。
