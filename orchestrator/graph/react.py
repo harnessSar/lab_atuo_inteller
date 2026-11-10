@@ -1,4 +1,7 @@
-"""自然语言 → UE 场景落地，采用网关模式）。
+"""兜底 ReAct：自然语言 → UE 场景落地（网关模式）。
+
+对话框先经 ``orchestrator.route`` 问自定义图，未命中才进本图。
+
 
 链路（ReAct环）：用户自然语言 → [plan] LLM 原生 tool calling 出**一步**
       → [execute] 唯一 @tool `unreal` 透传 EngineWire 网关（search/describe/execute）
@@ -17,8 +20,8 @@ import sys
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-# kin_pad/src 进 sys.path（禁硬编码业务路径）
-_KIN_PAD_SRC = Path(__file__).resolve().parents[2] / "kin_pad" / "src"
+# kin_pad/src 进 sys.path（禁硬编码业务路径）。本文件在 orchestrator/graph/，parents[3] = 仓库根
+_KIN_PAD_SRC = Path(__file__).resolve().parents[3] / "kin_pad" / "src"
 if _KIN_PAD_SRC.is_dir() and str(_KIN_PAD_SRC) not in sys.path:
     sys.path.insert(0, str(_KIN_PAD_SRC))
 
@@ -28,9 +31,10 @@ from langgraph.graph import END, StateGraph  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from llm.provider import ChatMessage, LlmConfig, LlmProvider  # noqa: E402
-from orchestrator.ue_mcp_client import UeMcpClient  # noqa: E402
 
-logger = logging.getLogger("lab_atuo_inteller.orchestrator.nl_graph")
+from orchestrator.client.ue_mcp_client import UeMcpClient  # noqa: E402
+
+logger = logging.getLogger("lab_atuo_inteller.orchestrator.graph.react")
 
 # ---------------------------------------------------------------------------
 # 工具面：单个 unreal 网关 @tool
@@ -206,6 +210,13 @@ def make_gateway_tool(client: UeMcpClient, work_dir: Path, sink: dict[str, str] 
         if operation == "search":
             if not query.strip():
                 return f"{_FAIL_PREFIX}search 需要 query（2-4 个英文实词，如 'spawn actor'）"
+            if _NON_UE_QUERY.search(query):
+                return ("unreal 网关只有 UE 编辑器能力，搜不到 Blender/资产编排能力"
+                        "（本拦截不打 UE，但仍计一次空转，连续空转任务会中止）。"
+                        "正确出口：Blender 场景导出 = 本地 blender_export_scene"
+                        "（需配置 [blender] command）或向用户要场景导出 JSON 路径；"
+                        "整机编排 = run_asset_onboarding。若此前有工具报错要求问用户，"
+                        "现在就用一句话问用户并结束本轮。")
             wire["query"] = query
             wire["limit"] = 6  # 一页 6 条够选；上下文保护
         elif operation == "describe":
@@ -248,7 +259,8 @@ def make_gateway_tool(client: UeMcpClient, work_dir: Path, sink: dict[str, str] 
     return unreal
 
 
-_PLANNER_SYS = """你是 UE 场景操作助手（ReAct 模式），通过唯一的 unreal 网关工具操作 Unreal Engine 编辑器。
+_PLANNER_SYS = """你是场景与运动学资产助手（ReAct）。
+对 Unreal 编辑器的操作走 unreal 网关；制作 TOML/Lua 走资产工具，不走 unreal。
 
 工作流（严格遵守）：
 1. search：（如 'spawn actor'、'set actor transform'、'capture viewport screenshot'）检索能力；
@@ -257,6 +269,10 @@ _PLANNER_SYS = """你是 UE 场景操作助手（ReAct 模式），通过唯一�
    有 examples 可照抄改值。
 3. execute：一次执行一个能力；params 里只放 describe 列过的键。
 
+硬规则：文字里说「我要用某能力 / I will use …」不会执行任何东西。要执行必须发出 tool_call。
+只宣布下一步时，系统会要求重发调用；连着宣布则任务失败。
+工具报错若要求"问用户/向用户要路径"：立刻照做，用一句话问完就结束本轮——
+不要改去别的工具硬试（尤其不要去 unreal 搜本地工具面的能力）。
 """
 
 # 图像分析VL追加段（LlmConfig.vision=True 时拼进 system prompt；纯文本模型不加）
@@ -271,10 +287,16 @@ _VISION_SUFFIX = """
 """
 
 
-# 资产编排追加段（enable_asset_tools=True 时拼进 system prompt）
+# 资产单步调试追加段（enable_asset_tools=True 时拼进 system prompt）
+# 整机编排不在本环：对话框路由命中后直接进 graph/custom/asset.py
 _ASSET_SUFFIX = """
-运动学资产编排工具（纯本地、无 UE；产物是 TOML/Lua 草稿，不落业务盘，人审后才合入）：
-- asset_catalog：读 Blender 场景导出 JSON → 物体清单（name/parent 装配父子）。编排必先调它。
+运动学资产的整机编排（读场景→语义单发→落地→机器闸→评分→人审）由对话框路由进入资产图，
+不在本环。用户要给一台设备整体建 TOML/Lua 时，用一句话复述「接入新设备 <设备名>」并带上
+场景来源（导出 JSON 路径，或说明 Blender 正开着），然后结束本轮。
+本环只保留单步调试工具（纯本地、无 UE；草稿不落业务盘，人审后才合入）：
+- asset_catalog：读 Blender 场景导出 JSON → 物体清单（name/parent 装配父子；单步调试用）。
+- blender_export_scene：从正在运行的 Blender 实况导出同一份清单（装配了才有；
+  与 asset_catalog 二选一）。
 - asset_land：把全部语义结论**一次性**提交落地（自动轴判定 + 主从镜像分组；每件只提交一次）。
   逐件判断运动：宁多勿漏、子级件也列、纯框架/瓶/工装等静止件不列；
   motion 指**该件自身**的自由度——丝杠/手指座/底座滑轨沿轴滑动永远是"平移"，
@@ -282,8 +304,14 @@ _ASSET_SUFFIX = """
   返回的人审提示必须原样报告用户，不得隐瞒。
 - asset_emit：由落地关节生成 TOML/Lua 草稿并跑机器闸；闸失败按问题清单修结论后重新 asset_land。
 - asset_score：草稿对 golden TOML/Lua 评分（进产物/type/axis/passive/lua + 失败明细）。
-编排流程：asset_catalog 看清单 → （有资料图就结合看）逐件判运动 → asset_land →
-asset_emit 看闸 → 有 golden 时 asset_score 评分并报告成绩与多出件。
+单步手动链（仅调试或流水线失败后的补救）：asset_catalog 或 blender_export_scene 看清单 →
+asset_land → asset_emit 看闸 → 有 golden 时 asset_score 评分并报告成绩与多出件。
+场景数据只来自导出 JSON 或 Blender 实况（含 name/parent/matrix_local）。
+用户说 Blender 正打开但工具面里没有 blender_export_scene 时，用一句话向用户要导出 JSON
+绝对路径并结束。
+unreal 网关里只有 UE 编辑器能力：Blender 导出与资产编排工具都不在其中，
+到 unreal 搜它们会被确定性拦截并计空转（连续空转任务中止）。
+禁止为此 search/execute UE 的 asset.list：那是内容浏览器里的 uasset 列表，没有装配矩阵。
 """
 
 #skills中3个目录的排序优先级
@@ -291,13 +319,14 @@ _SKILL_ORDER = {"workflow": 0, "device": 1, "other": 2}
 
 
 def _load_skills(skills_dir: Path | None) -> str:
-    """扫描 ``skills_dir/**/SKILL.md`` 拼 prompt 段（最小实现：全量注入 system prompt）。
+    """扫描 ``skills_dir/**/SKILL.md``，全部注入 system prompt。
 
     目录三分：``workflow/`` Blender–KinPad–Unreal，``device/`` 设备类型，``other/`` 其余。
     格式同 ``.cursor/skills``（YAML frontmatter + 正文）；frontmatter 剥掉，只注正文。
-    标题用相对路径，便于模型按类命中。skill 再涨后改 RAG 按需加载，本函数是过渡。
+    目录缺失或读失败打日志，不另做截断/小样集绕路。
     """
     if not skills_dir or not skills_dir.is_dir():
+        logger.warning("技能目录不存在，本轮不注入 skill: %s", skills_dir)
         return ""
 
     def _sort_key(smd: Path) -> tuple[int, str]:
@@ -306,10 +335,12 @@ def _load_skills(skills_dir: Path | None) -> str:
         return (_SKILL_ORDER.get(top, 9), rel.as_posix().lower())
 
     parts: list[str] = []
+    names: list[str] = []
     for smd in sorted(skills_dir.glob("**/SKILL.md"), key=_sort_key):
         try:
             text = smd.read_text(encoding="utf-8")
-        except OSError:
+        except OSError as exc:
+            logger.warning("无法读取 skill %s: %s", smd, exc)
             continue
         body = text
         if text.startswith("---"):
@@ -319,8 +350,11 @@ def _load_skills(skills_dir: Path | None) -> str:
         if body:
             rel = smd.parent.relative_to(skills_dir).as_posix()
             parts.append(f"### 技能：{rel}\n{body}")
+            names.append(rel)
     if not parts:
+        logger.warning("技能目录无可用 SKILL.md: %s", skills_dir)
         return ""
+    logger.info("已注入 %d 张 skill: %s", len(names), ", ".join(names))
     return (
         "\n\n## 业务技能（命中即按技能执行，不得自由发挥）\n\n"
         "分三类：`workflow/` = Blender–KinPad–Unreal 工作流；"
@@ -328,6 +362,18 @@ def _load_skills(skills_dir: Path | None) -> str:
         "几何常数、脉冲标定、端口以磁盘 TOML 与 `.cursor/rules` 为准，技能卡片里的数字只是提示。\n\n"
         + "\n\n".join(parts)
     )
+
+
+def assemble_planner_prompt(vision: bool, has_asset_tools: bool,
+                            skills_dir: str | Path | None = None) -> str:
+    """拼装 plan 系统提示词（规则 + vision 后缀 + 资产后缀 + skills）——单一来源。
+
+    ``run_nl_command`` 与 Studio 图工厂（``studio_graphs``）共用；后者没有
+    Python 包裹层播种 messages，靠 build_nl_graph 的 prep 入口节点消费本提示词。
+    """
+    sd = Path(skills_dir) if skills_dir else (Path(__file__).resolve().parents[2] / "skills")
+    return (_PLANNER_SYS + (_VISION_SUFFIX if vision else "")
+            + (_ASSET_SUFFIX if has_asset_tools else "") + _load_skills(sd))
 
 # ---------------------------------------------------------------------------
 # 定义状态图
@@ -344,6 +390,7 @@ class NlState(TypedDict, total=False):
     user_input: str              # 用户自然语言指令（invoke 时写入）
     messages: list[ChatMessage]  # 累积对话（system/user + assistant tool_calls + tool 观察）
     steps: int                   # 已 execute 次数（仅网关 operation=execute 计 1），max_steps 防死循环
+    probes: int                  # 连续 search/describe 次数；execute 或资产工具成功后清零
     fails: int                   # 本地校验拦截**连续**计数
     plan: dict[str, Any]         # 本步计划：{tool:"unreal", arguments, call_id}；execute 按名分发
     error: str                   # 任何节点失败写此；非空 → 条件边短路到 report
@@ -356,6 +403,33 @@ class NlState(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 # 节点
 # ---------------------------------------------------------------------------
+
+# 口头计划（无 tool_call）不能当收敛。Qwen3-VL 常把「下一步要用 asset.list」写进 content 就停。
+_INTENT_RE = re.compile(
+    r"((I will|I'll|I am going to|let me)\s+(use|call|invoke|execute|list))|"
+    r"(capability is available)|"
+    r"((将要|我将|我会|我来|接下来|我要).{0,16}(调用|使用|执行))",
+    re.IGNORECASE,
+)
+_PROBE_CAP = 4  # 连续 search/describe 上限（它们不计 steps，否则会空转几十轮）
+# 确定性拦截：Blender/资产编排是**本地工具面**能力，UE 网关里永远没有（机器闸：
+# 实测模型拿 "blender export scene" 到 UE 空搜撞 probe 闸；拦截文本直接给正确出口）
+_NON_UE_QUERY = re.compile(
+    r"blender|export.?scene|场景导出|资产编排|onboarding|运动学资产|\.toml|\.lua",
+    re.IGNORECASE)
+_INTENT_NUDGE = (
+    "上一条只是文字计划，没有 tool_call，工具没有执行。"
+    "制作 TOML/Lua：用户已给出场景导出 JSON 的绝对路径时，立刻 function call "
+    "asset_catalog(scene_path=该路径)；没有路径就用一句话向用户要路径并结束。"
+    "不要调用 unreal 的 asset.list（UE 内容浏览器，没有 name/parent/matrix_local）。"
+    "其它 UE 操作必须 function call unreal，不要只写 I will use …。"
+)
+
+
+def _unexecuted_intent(text: str) -> bool:
+    """正文在宣布下一步、且没有配 tool_call。向用户索取路径的结论不在此列。"""
+    return bool(text and _INTENT_RE.search(text))
+
 
 def make_plan_node(llm: LlmProvider, tool_defs: list[dict[str, Any]], max_steps: int = 18,
                    vision: bool = False):
@@ -371,6 +445,8 @@ def make_plan_node(llm: LlmProvider, tool_defs: list[dict[str, Any]], max_steps:
         #1错误控制：超过最大步数或错误3次，中止任务，向上报错
         if state.get("steps", 0) >= max_steps:
             return {"error": f"超过最大步数 {max_steps}（execute 上限），任务未收敛"}
+        if state.get("probes", 0) >= _PROBE_CAP:
+            return {"error": f"连续 {_PROBE_CAP} 次 search/describe 没有 execute，也没有调用资产工具，任务中止"}
         if state.get("fails", 0) >= 3:
             return {"error": "参数连续 3 次未通过本地校验，任务中止"}
 
@@ -392,8 +468,8 @@ def make_plan_node(llm: LlmProvider, tool_defs: list[dict[str, Any]], max_steps:
         consumed: NlState = {"vision_image": ""} if vision_consumed else {}
         last_err = ""
 
-        #3.LLM推理
-        for _ in range(2):  
+        #3.LLM推理（多留 1 次给「只宣布不调用」的回推）
+        for _ in range(3):
             try:
                 msg = llm.chat(msgs, tools=tool_defs)
             except RuntimeError as e:
@@ -402,14 +478,19 @@ def make_plan_node(llm: LlmProvider, tool_defs: list[dict[str, Any]], max_steps:
             
             calls = msg.get("tool_calls") or []
 
-            #3.2.没有工具调用，说明模型直接给出了结论，直接返回
+            #3.2.没有工具调用：口头计划回推；真正的结论才收敛
             if not calls:
                 conclusion = (msg.get("content") or "").strip()
                 base_len = len(state["messages"]) + (1 if vision_consumed else 0)
+                if _unexecuted_intent(conclusion):
+                    last_err = f"只宣布未调用: {conclusion[:160]}"
+                    logger.info("plan[intent]: 无 tool_call，回推。%s", conclusion[:160])
+                    msgs.append(ChatMessage("user", _INTENT_NUDGE))
+                    continue
                 if not conclusion and len(msgs) == base_len:
                     msgs.append(ChatMessage("user", "请立即调用工具执行，或用文字给出结论。"))
                     continue
-                # 收敛出口：完成、直接回答、做不了
+                # 收敛出口：完成、直接回答、做不了（含向用户要场景 JSON 路径）
                 return {"report": conclusion or "（模型未给出结论）",
                         "messages": msgs + [ChatMessage("assistant", conclusion or "（模型未给出结论）")],
                         **consumed}
@@ -434,7 +515,7 @@ def make_plan_node(llm: LlmProvider, tool_defs: list[dict[str, Any]], max_steps:
             logger.info("plan[exec %d]: %s %s", state.get("steps", 0), name,
                         str(arguments)[:200])
             return {"plan": plan, "messages": hist, **consumed}
-        return {"error": f"计划解析失败（重试 2 次）：{last_err}", "messages": msgs, **consumed}
+        return {"error": f"计划解析失败（重试后仍无合法 tool_call）：{last_err}", "messages": msgs, **consumed}
 
     return plan_node
 
@@ -493,8 +574,12 @@ def make_execute_node(tools: dict[str, Any], work_dir: Path,
         hist = state["messages"] + [ChatMessage("tool", obs, tool_call_id=plan["call_id"])]
         out: NlState = {"result": {"content_text": obs}, "messages": hist, "fails": 0}
         
-        # 4.更新steps
-        if plan["tool"] != _GATEWAY_TOOL or (plan["arguments"].get("operation") or "") == "execute":
+        # 4.更新steps；search/describe 不计 steps，但连续探测计入 probes，避免空转
+        op = (plan["arguments"].get("operation") or "") if plan["tool"] == _GATEWAY_TOOL else ""
+        if plan["tool"] == _GATEWAY_TOOL and op in ("search", "describe"):
+            out["probes"] = state.get("probes", 0) + 1
+        else:
+            out["probes"] = 0
             out["steps"] = state.get("steps", 0) + 1
         m = re.match(r"\[screenshot\] (.+)", obs)
         if m:
@@ -525,9 +610,14 @@ def report_node(state: NlState) -> NlState:
 # ---------------------------------------------------------------------------
 
 def build_nl_graph(llm: LlmProvider, client: UeMcpClient, work_dir: Path, max_steps: int = 18,
-                   vision: bool = False, extra_tools: list | None = None):
+                   vision: bool = False, extra_tools: list | None = None,
+                   sys_prompt: str = ""):
     """
     @abstract:装配 LangGraph
+
+    ``sys_prompt`` 非空时加 ``prep`` 入口节点：messages 为空（Studio 直接 invoke
+    只有 ``user_input``）时播种 [system, user]；调用方已播种（run_nl_command）
+    则透传，行为无分叉。
     """
     # 1.制作node：计划、执行、反馈这3个
     sink: dict[str, str] = {}  # 截图 data URL 旁路
@@ -543,7 +633,19 @@ def build_nl_graph(llm: LlmProvider, client: UeMcpClient, work_dir: Path, max_st
     g.add_node("plan", make_plan_node(llm, tool_defs, max_steps, vision))
     g.add_node("execute", make_execute_node(tools, work_dir, sink, vision))
     g.add_node("report", report_node)
-    g.set_entry_point("plan")
+    if sys_prompt:
+        def prep_node(state: NlState) -> NlState:
+            """入口播种：Studio 直调只给 user_input，补 [system, user]；已有历史则透传。"""
+            if state.get("messages"):
+                return {}
+            return {"messages": [ChatMessage("system", sys_prompt),
+                                 ChatMessage("user", state.get("user_input", ""))],
+                    "steps": 0, "probes": 0, "fails": 0}
+        g.add_node("prep", prep_node)
+        g.set_entry_point("prep")
+        g.add_edge("prep", "plan")
+    else:
+        g.set_entry_point("plan")
 
     # 3.制作edge：plan ⇄ execute 的 ReAct 环   
     # 完成的情况:plan->execute->plan->report->END
@@ -575,35 +677,39 @@ def run_nl_command(
     max_steps: int = 18,
     user_images: list[str] | None = None,
     enable_asset_tools: bool = True,
+    blender_command: list[str] | None = None,
 ) -> NlState:
-    """
-    一次自然语言指令的端到端入口，返回NlState状态。
-    """
+    """兜底 ReAct 一次指令。对话框入口是 ``orchestrator.route.dispatch``，先问自定义图。"""
     # 装配模型
     llm = LlmProvider(llm_cfg)
     # 装配 UE MCP 客户端
     client = UeMcpClient(ue_endpoint, token_file=ue_token_file)
     # 证据目录
-    wd = work_dir or (Path(__file__).resolve().parents[1] / "_work")
+    wd = work_dir or (Path(__file__).resolve().parents[2] / "_work")
     # 技能目录
-    sd = Path(skills_dir) if skills_dir else (Path(__file__).resolve().parents[1] / "skills")
+    sd = Path(skills_dir) if skills_dir else (Path(__file__).resolve().parents[2] / "skills")
     # 是否支持vision
     vision = llm.cfg.vision
     
-    # 资产编排工具
+    # 单步资产工具 + 可选 Blender 实况源。整机编排不挂本环（route 先认领资产图）
     extra: list = []
     if enable_asset_tools:
         try:
-            from orchestrator.asset_tools import make_asset_tools
+            from orchestrator.tool.asset_tools import make_asset_tools
             extra = make_asset_tools(wd)
+            if blender_command:
+                from orchestrator.client.mcp_stdio_client import McpStdioClient
+                from orchestrator.tool.blender_tools import make_blender_tools
+                extra += make_blender_tools(McpStdioClient(blender_command), wd)
         except ImportError as exc:
             logger.warning("资产工具不可用（%s），本轮仅 UE 网关", exc)
-    #提示词生成：系统提示词+vision提示词+资产编排提示词+技能提示词
-    sys_prompt = (_PLANNER_SYS + (_VISION_SUFFIX if vision else "")
-                  + (_ASSET_SUFFIX if extra else "") + _load_skills(sd))
-    
-    # 编译状态图
-    graph = build_nl_graph(llm, client, wd, max_steps, vision, extra_tools=extra)
+
+    #提示词生成：系统提示词+vision提示词+资产编排提示词+技能提示词（单一来源）
+    sys_prompt = assemble_planner_prompt(vision, bool(extra), sd)
+
+    # 编译状态图（sys_prompt 传入后 prep 入口兜底；下方 init 已播种，prep 透传）
+    graph = build_nl_graph(llm, client, wd, max_steps, vision, extra_tools=extra,
+                           sys_prompt=sys_prompt)
     # ReAct初始：system 规则 + 用户指令
     init_user = ChatMessage("user", user_input,
                             images=(user_images if (vision and user_images) else None))
@@ -611,6 +717,7 @@ def run_nl_command(
         "user_input": user_input,
         "messages": [ChatMessage("system", sys_prompt), init_user],
         "steps": 0,
+        "probes": 0,
         "fails": 0,
     }
     

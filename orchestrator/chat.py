@@ -4,20 +4,21 @@
     python -m orchestrator.chat "在UE中新增1个立方体网格"
     python -m orchestrator.chat "把 MCP_Cube_1 移到 z=200" --ue-endpoint http://127.0.0.1:8000/mcp
 
-链路：自然语言 → LangGraph(plan[LLM] → execute[UE MCP] → evidence[截图] → report)。
+链路：自然语言 → route（自定义图命中则跑该图，否则 ReAct plan⇄execute→report）。
 模型连接读 ``config/sim_harness.toml [llm]``（Ollama/vLLM 只改配置）。
 """
 
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 
 import toml
 
 from llm.provider import LlmConfig
-from orchestrator.nl_graph import run_nl_command
+from orchestrator.route import dispatch
 
 
 def main() -> int:
@@ -48,11 +49,13 @@ def main() -> int:
     )
     endpoint = args.ue_endpoint or ue_t.get("endpoint", "http://127.0.0.1:3000/mcp")
     token_file = ue_t.get("token_file")  # EngineWire capability-token（per-machine，可空=无鉴权）
+    # [blender]：stdio MCP 启动命令（空 = 未配置，blender_* 工具不装配）
+    blender_command = shlex.split(cfg_toml.get("blender", {}).get("command", "") or "") or None
     work_dir = _rel(cfg_toml.get("paths", {}).get("work_dir", "sim_harness/_work"))
-    # [nl] skills_dir：相对 sim_root 的 skill 注入目录（缺省 = skills/ 全量）
+    # [nl] skills_dir：相对 sim_root 的 skill 注入目录（缺省 skills/）
     sd = cfg_toml.get("nl", {}).get("skills_dir")
     skills_dir = (sim_root / sd).resolve() if sd else None
-    # --images → data URL（vision 闸在 run_nl_command：纯文本模型丢弃）
+    # --images → data URL（vision 闸在 ReAct：纯文本模型丢弃；资产图同样只在 vision 时使用）
     user_images = None
     if args.images:
         import base64
@@ -62,9 +65,10 @@ def main() -> int:
             + base64.b64encode(Path(p).read_bytes()).decode()
             for p in args.images]
 
-    final = run_nl_command(args.instruction, llm_cfg=llm_cfg, ue_endpoint=endpoint,
-                           ue_token_file=token_file, work_dir=work_dir,
-                           skills_dir=skills_dir, user_images=user_images)
+    final = dispatch(args.instruction, llm_cfg=llm_cfg, ue_endpoint=endpoint,
+                     ue_token_file=token_file, work_dir=work_dir,
+                     skills_dir=skills_dir, user_images=user_images,
+                     blender_command=blender_command)
     print(final.get("report", "(无报告)"))
     return 0 if not final.get("error") else 1
 

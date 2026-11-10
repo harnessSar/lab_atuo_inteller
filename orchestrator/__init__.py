@@ -1,1 +1,1 @@
-"""sim_harness 编排层（Phase 1 顺序管线；LangGraph 就绪后平铺替换为图节点）。"""
+"""sim_harness 编排层。对话框入口 ``route.dispatch``：先自定义图，未命中再 ReAct。"""

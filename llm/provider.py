@@ -80,8 +80,14 @@ class LlmProvider:
         *,
         tools: list[dict[str, Any]] | None = None,
         json_schema: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> dict[str, Any]:
         """单次对话。``json_schema`` 提供时请求 guided/structured 输出（vLLM 支持；Ollama 部分支持）。
+
+        ``max_tokens``：输出上限（长 JSON 结论防截断；缺省由服务端决定）。
+        ``temperature``：单次覆盖采样温度（缺省用 ``cfg.temperature``）；
+        确定性单发（如资产语义步）传 0.0。
 
         Returns:
             原始 ``choices[0].message`` dict（含 content / tool_calls）。
@@ -91,8 +97,10 @@ class LlmProvider:
         body: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": [m.to_dict() for m in messages],
-            "temperature": self.cfg.temperature,
+            "temperature": self.cfg.temperature if temperature is None else temperature,
         }
+        if max_tokens:
+            body["max_tokens"] = max_tokens
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"

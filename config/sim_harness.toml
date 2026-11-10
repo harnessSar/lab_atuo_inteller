@@ -1,5 +1,4 @@
-# sim_harness 配置（禁硬编码绝对路径；相对路径相对仓库根 D:\project）
-# 单位：长度 mm（算法/TOML/Lua），UE 工站/机位 cm（仅 ParseMatrixLocal 换一次）
+# sim_harness配置
 
 [paths]
 # kin_pad 根（含 pyproject.toml）
@@ -8,17 +7,15 @@ kin_pad_root = "kin_pad"
 save_dir = "kin_pad/save"
 # UE 演示 Actor 源（三端 diff 第三端）
 lambda_spool_cpp = "PID/Plugins/XtalScene/Source/XtalScene/Private/kin/LambdaSpool.cpp"
-# HTE 设备档案 JSON
-hte_json = "PID/HTE设备介绍.json"
+# HTE 设备档案 JSON（2026-11-10 修正：旧值 PID/HTE设备介绍.json 磁盘不存在，
+# 真实档案为下值；C++ 插件 Hte.BrushSlots 省略 JsonPath 时的默认路径同样过时，故调用必显式传路径）
+hte_json = "PID/Docs/HTE.json"
 # 编排证据/草稿工作区（非业务目录，落盘业务产物需人审）
 work_dir = "lab_atuo_inteller/_work"
 
 [nl]
-# ReAct 环 skill 注入目录（相对 lab_atuo_inteller/）。全量 17 个 skill ≈7K tok，
-# 16K ctx 的资产编排链放不下（2026-11-06 实测 16481>16384）；先指向 _work/skills_mini
-# （3 个相关 skill ≈1.2K tok）。注释掉本行 = 默认 skills/ 全量（UE 指令适用）；
-# 根治等 H5 RAG 按需加载。
-skills_dir = "_work/skills_mini"
+# ReAct 环 skill 注入目录
+skills_dir = "skills"
 
 [unreal]
 # EngineWire 原生 MCP（PID 编辑器内插件，单 unreal 网关工具；官方插件/lab_simmer 旧路已弃）
@@ -28,25 +25,33 @@ token_file = "D:/project/PID/Saved/MCP/capability-token"
 # UE 步骤（刷槽位/装载）默认关；验证时显式开
 run_ue_steps = false
 
+[blender]
+# Blender MCP（stdio）启动命令行（空格分词）；留空 = 未配置：blender_* 工具不装配、
+# 资产图的 live_blender 不可用（场景走导出 JSON 文件流，管线不受影响）。
+# 当前 = vendor 版 mcp-for-blender（_work/vendor/blender-mcp 已装 venv，启动器注入遥测关）；
+# 适配层 export_scene_items 走其 execute_blender_code 注片段出契约 JSON。
+# 前提：Blender 里 addon 面板已点 Connect（本进程只是 MCP↔socket:9876 的桥）。
+command = "D:/project/kin_pad/.venv/Scripts/python.exe D:/project/lab_atuo_inteller/launch_blender_mcp.py"
+
+[asset]
+# 人审批准后草稿合入目录（空 = 批准也不复制，草稿留 asset_run 由人手工处理）；
+# run_asset CLI 的 --merge-dir 优先于本配置
+merge_dir = ""
+
 [golden]
 run_golden = true
 
-# ---------------------------------------------------------------------------
-# 模型：开发期 5060 Ollama（Windows 原生）；联调/生产切 5090 vLLM（Linux 原生）
-# 本地推理零许可费；仅云端 API 按 token 计费。
-# 切换只改 base_url/model，图与工具不变。
-# ---------------------------------------------------------------------------
+
 [llm]
 # 联调/生产（5090 vLLM，跨机 HTTP）——当前生效（2026-11-03 切）
 base_url = "http://10.249.21.47:8000/v1"
 #model = "Qwen/Qwen2.5-32B-Instruct-AWQ"
 model = "tclf90/Qwen3-VL-30B-A3B-Instruct-AWQ"
 api_key = "EMPTY"
-# VL 总闸：多模态模型 = true（nl_graph 截图带图回喂，模型真"看到"视口）；
-# 纯文本模型必须 false（图只落盘不进消息，防 serving 400）
+# VL 总闸：多模态模型 = true（ReAct 图截图带图回喂，模型真"看到"视口）；
 vision = true
 
-# 开发（5060 Ollama；取消注释并注释上面三行；qwen2.5 纯文本，vision 须改 false）
+# （5060 Ollama；取消注释并注释上面三行；qwen2.5 纯文本，vision 须改 false）
 # base_url = "http://localhost:11434/v1"
 # model = "qwen2.5:7b"
 # api_key = "ollama"

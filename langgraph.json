@@ -1,0 +1,10 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "asset": "./orchestrator/studio_graphs.py:asset_graph",
+    "nl": "./orchestrator/studio_graphs.py:nl_graph",
+    "bp": "./orchestrator/studio_graphs.py:bp_graph"
+  },
+  "env": {}
+}
